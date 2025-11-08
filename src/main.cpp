@@ -41,6 +41,19 @@ void speakDispense()
   dacWrite(AUDIO_PIN, 0); // Reset DAC after speech
 }
 
+void speakLevelLow()
+{
+  // Ensure DAC pin is ready for Talkie output
+  dacWrite(AUDIO_PIN, 0);
+  voice.say(sp4_WARNING);
+  delay(200);
+  voice.say(sp4_LEVEL);
+  delay(200);
+  voice.say(sp3_LOW);
+  delay(200);
+  dacWrite(AUDIO_PIN, 0); // Reset DAC after speech
+}
+
 // -----------------------------
 // WiFi and Cloud Configuration
 // -----------------------------
@@ -197,6 +210,7 @@ void maybeLowStockAlert(int pill, int prevStock, int prevThresh)
   if (prevStock > prevThresh && stockv[pill] <= thresh[pill])
   {
     pushAlert("pill_low", pill, "Pill stock is low", stockv[pill]);
+    speakLevelLow();
   }
 }
 
