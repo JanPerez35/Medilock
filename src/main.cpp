@@ -299,7 +299,8 @@ void displayLogAtIndex(int index)
   struct tm timeinfo;
   localtime_r(&logs[index].ts, &timeinfo);
   char buf[16];
-  strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
+
+  strftime(buf, sizeof(buf), "%d/%m/%y %H:%M", &timeinfo);
   lcdShow("P" + String(logs[index].pill) + " Dispensed", buf);
 }
 
