@@ -9,10 +9,6 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <WiFiUdp.h>
-//motor inclusion
-#include <driver/mcpwm.h>
-#include "soc/mcpwm_reg.h"
-#include "soc/mcpwm_struct.h"
 
 // -----------------------------
 // Talkie Audio Configuration
@@ -28,6 +24,33 @@ Talkie voice; // Initialize Talkie instance
 // DAC pin for audio output
 static const int AUDIO_PIN = 25;
 
+/**
+ * Audio Output: "Action time for service" (keep original delays)
+ */
+void speakDispense()
+{
+  dacWrite(AUDIO_PIN, 0);
+  // voice.say(sp4_ACTION); delay(120);  // uncomment if you want "Action"
+  voice.say(sp3_TIME);
+  delay(120);
+  voice.say(sp4_FOR);
+  delay(140);
+  voice.say(sp4_SERVICE);
+  delay(140);
+  dacWrite(AUDIO_PIN, 0);
+}
+
+void speakLevelLow()
+{
+  dacWrite(AUDIO_PIN, 0);
+  voice.say(sp4_WARNING);
+  delay(200);
+  voice.say(sp4_LEVEL);
+  delay(200);
+  voice.say(sp3_LOW);
+  delay(200);
+  dacWrite(AUDIO_PIN, 0);
+}
 
 // -----------------------------
 // WiFi and Cloud Configuration
@@ -89,61 +112,9 @@ LogEntry logs[5];
 int logCount = 0;
 int logIndex = 0;
 
-// ---------------------------
-// Stepper & Servo pin config
-//---------------------------
-
-// Stepper (TB6600 or DRV8825)
-#define STEP_PIN   27   // Step pulse output
-#define DIR_PIN    26   // Direction control
-#define EN_PIN     33   // Enable (active LOW)
-#define LINE_PIN   14   // Line tracker sensor
-// Servo signal (using MCPWM0A)
-#define SERVO_PIN  13
-// Stepper motion parameters
-const int stepPulseWidth_us = 20;     // 10–20µs pulse width (TB6600 min requirement)
-const int steps_per_rev = 1600;       // adjust based on microstep DIP switches
-const int steps_per_sector = steps_per_rev / 5; // 5 sectors = 72° per step
-const int minDelay = 6000;            // smooth motion fast limit
-const int maxDelay = 12000;           // smooth motion slow limit
-int currentPos = 1;
-/* ========= SERVO CONFIG (MCPWM) ========= */
-static const mcpwm_unit_t   SERVO_UNIT  = MCPWM_UNIT_0;
-static const mcpwm_timer_t  SERVO_TIMER = MCPWM_TIMER_0;
-static const mcpwm_io_signals_t SERVO_SIG = MCPWM0A;
-static const uint32_t SERVO_FREQ_HZ = 50;
-static const float MIN_PULSE_MS = 0.5f;
-static const float MAX_PULSE_MS = 2.4f;
 // -----------------------------
-// Utility Helper func
+// Utility
 // -----------------------------
-/**
- * Audio Output: "Action time for service" (keep original delays)
- */
-void speakDispense()
-{
-  dacWrite(AUDIO_PIN, 0);
-  // voice.say(sp4_ACTION); delay(120);  // uncomment if you want "Action"
-  voice.say(sp3_TIME);
-  delay(120);
-  voice.say(sp4_FOR);
-  delay(140);
-  voice.say(sp4_SERVICE);
-  delay(140);
-  dacWrite(AUDIO_PIN, 0);
-}
-
-void speakLevelLow()
-{
-  dacWrite(AUDIO_PIN, 0);
-  voice.say(sp4_WARNING);
-  delay(200);
-  voice.say(sp4_LEVEL);
-  delay(200);
-  voice.say(sp3_LOW);
-  delay(200);
-  dacWrite(AUDIO_PIN, 0);
-}
 String makeUrl(const char *path) {
   String u = BASE;
   u += path;
@@ -161,40 +132,7 @@ void lcdShow(const String &l1, const String &l2) {
   lcd.print(l2.substring(0, 16));
 #endif
 }
-// ----- Enable/Disable stepper driver -----
-void enableMotor(bool on) {
-  digitalWrite(EN_PIN, on ? LOW : HIGH);   // active LOW enable
-  Serial.printf("[MOTOR] %s\n", on ? "ENABLED" : "DISABLED");
-}
 
-// ----- Convert angle to microsecond pulse width -----
-static inline uint32_t angleToUs(float deg) {
-  deg = constrain(deg, 0.0f, 180.0f);
-  float us = (MIN_PULSE_MS + (deg / 180.0f) *
-             (MAX_PULSE_MS - MIN_PULSE_MS)) * 1000.0f;
-  return (uint32_t)(us + 0.5f);
-}
-
-// ----- Set servo angle -----
-void setServoAngle(float deg) {
-  uint32_t us = angleToUs(deg);
-  mcpwm_set_duty_in_us(SERVO_UNIT, SERVO_TIMER, MCPWM_OPR_A, us);
-  Serial.printf("[SERVO] angle=%.1f°, pulse=%u µs\n", deg, us);
-}
-
-// ----- Smooth acceleration stepper move -----
-void rotateStepsSmooth(int steps, int minDelay, int maxDelay) {
-  for (int i = 0; i < steps; i++) {
-    float phase = (float)i / steps;
-    float curve = 0.5f - 0.5f * cos(PI * phase);
-    int delay_us = maxDelay - (maxDelay - minDelay) * curve;
-
-    digitalWrite(STEP_PIN, HIGH);
-    delayMicroseconds(stepPulseWidth_us);
-    digitalWrite(STEP_PIN, LOW);
-    delayMicroseconds(delay_us);
-  }
-}
 // ---- TS formatting helpers ----
 // Line-2 fits 16 chars exactly: "DD/MM/YY HH:MMAM"
 void formatDateLine(char* out, size_t n, time_t t) {
@@ -388,18 +326,9 @@ void displayLogAtIndex(int index) {
 int confirmAllDuePills() {
   time_t now; time(&now);
   int cleared = 0;
-  enableMotor(true);           // Enable driver (TB6600 active LOW)
-  delay(10);
 
   for (int p = 1; p <= 5; ++p) {
     if (freqv[p] > 0 && now >= nextDispense[p] && dispensing[p]) {
-
-      // === Physical Dispense Sequence ===
-      moveToPosition(p);           // Rotate carousel to that pill slot
-      operateServo(60, 0);         // Open + close servo to drop pill
-      delay(500);
-      // ===============================
-      //==cloud and logging==
       if (stockv[p] > 0) stockv[p]--;
 
       char line2[17];
@@ -416,16 +345,6 @@ int confirmAllDuePills() {
       scheduleNextDispense(p); // push to future & clear dispensing[p]
       cleared++;
     }
-  }
-  homeDisk();                 // Optional: return to home after each pill
-  delay(400);                 // mechanical system time to settle.
-  enableMotor(false);          // Disable driver after move
-  // === Post-cycle cleanup ===
-  if (cleared > 0) {
-    lcdShow("All set", "Cleared " + String(cleared));
-    Serial.printf("[DISPENSE] %d pill(s) dispensed.\n", cleared);
-  } else {
-    Serial.println("[DISPENSE] No pills due — nothing dispensed.");
   }
   return cleared;
 }
@@ -506,58 +425,7 @@ void checkDispenseSchedule() {
 
   // 4) No confirm; nothing else to do here this tick
 }
-/* ========= POSITION CONTROL ========= */
 
-// ----- Move to specific sector (1–5) -----
-void moveToPosition(int targetPos) {
-  if (targetPos == currentPos) return;
-
-  // enableMotor(true);    // energize coils
-  // delay(10);
-
-  int delta = targetPos - currentPos;
-  if (delta > 2)  delta -= 5;     // shortest rotation path
-  if (delta < -2) delta += 5;
-
-  int stepsToMove = abs(delta) * steps_per_sector;
-  bool dir = (delta > 0);
-  digitalWrite(DIR_PIN, dir ? HIGH : LOW);
-
-  Serial.printf("[STEPPER] Moving %s %d sectors (%d steps)\n",
-                dir ? "CW" : "CCW", abs(delta), stepsToMove);//debug
-  rotateStepsSmooth(stepsToMove, minDelay, maxDelay);
-
-  currentPos = targetPos;
-  delay(200);           // small hold after motion
-  //enableMotor(false);   // release torque
-  Serial.printf("[STEPPER] now at sector %d\n", currentPos);//debug
-}
-
-// ----- Homing routine -----
-void homeDisk() {
-  Serial.println("[HOME] Homing...");//debug
-  enableMotor(true);
-  digitalWrite(DIR_PIN, LOW);
-  int maxSteps = 2 * steps_per_rev;
-  while (digitalRead(LINE_PIN) == LOW && maxSteps-- > 0) {
-    digitalWrite(STEP_PIN, HIGH);
-    delayMicroseconds(stepPulseWidth_us);
-    digitalWrite(STEP_PIN, LOW);
-    delayMicroseconds(12000);
-  }
-  currentPos = 1;
-  enableMotor(false);
-  Serial.println("[HOME] aligned at position 1");//debug
-}
-// ----- Servo dispense operation -----
-void operateServo(float openDeg, float closeDeg) {
-  Serial.println("[SERVO] Opening...");
-  setServoAngle(openDeg);
-  delay(300);
-  Serial.println("[SERVO] Closing...");
-  setServoAngle(closeDeg);
-  delay(300);
-}
 // -----------------------------
 // ISR + Setup + Loop
 // -----------------------------
@@ -577,36 +445,14 @@ void setup() {
   lcd.backlight();
   lcdShow("Booting...", "WiFi connect");
 #endif
-  //Button configurations
+
   pinMode(BTN_PIN, INPUT);
   pinMode(BTN_DOWN, INPUT);
   pinMode(BTN_UP, INPUT);
   attachInterrupt(digitalPinToInterrupt(BTN_PIN), btnISR, RISING);
-  //audio pin
+
   pinMode(AUDIO_PIN, OUTPUT);
-  // ====== Stepper & Servo Initialization ======
-  pinMode(STEP_PIN, OUTPUT);
-  pinMode(DIR_PIN, OUTPUT);
-  pinMode(EN_PIN, OUTPUT);
-  pinMode(LINE_PIN, INPUT);
-  enableMotor(false); // keep disabled at boot
-  // Servo PWM configuration
-  mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, SERVO_PIN);
-  mcpwm_config_t cfg;
-  cfg.frequency = SERVO_FREQ_HZ;
-  cfg.cmpr_a = 0.0f;
-  cfg.cmpr_b = 0.0f;
-  cfg.counter_mode = MCPWM_UP_COUNTER;
-  cfg.duty_mode = MCPWM_DUTY_MODE_0;
-  mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &cfg);
 
-  // Start with servo closed
-  setServoAngle(0);
-  delay(500);
-  Serial.println("TB6600 + Servo Control Ready");
-  homeDisk();
-
-  // wi-fi configuration
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("WiFi");
   while (WiFi.status() != WL_CONNECTED) {
