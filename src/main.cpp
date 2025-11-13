@@ -398,8 +398,12 @@ void displayLogAtIndex(int index)
 
 // Stepper configuration (FULL STEP)
 const int stepPulseWidth_us = 30;
-const int steps_per_rev = 200;                  // FULL STEP correct
+const int steps_per_rev = 1600;                  // FULL STEP correct
 const int steps_per_sector = steps_per_rev / 5; // 40 steps per 72° sector
+// Homing configuration (simple version)
+const int HOME_LEVEL = HIGH;         // change to LOW if white is home
+const int HOME_STEP_DELAY_US = 3000; // slow & strong for homing
+const int MAX_HOME_STEPS = 3000;     // up to ~15 revs @ 200 steps/rev
 
 int currentPos = 0; // Current sector (0–4), mapping 0..4 to 5 pill slots
 
@@ -503,29 +507,48 @@ void moveToPosition(int targetPos)
 }
 
 // Homing routine to find the LINE mark and define sector 0
+// Simple homing: rotate in one direction until LINE_PIN == HOME_LEVEL
+// or we hit MAX_HOME_STEPS. Then define that as sector 0.
 void home()
 {
-  Serial.println("Starting homing...");
+  Serial.println("=== HOME(): simple homing start ===");
 
-  digitalWrite(EN_PIN, HIGH); // disable driver
+  // Enable motor
+  enableMotor(true);
   delay(50);
-  digitalWrite(EN_PIN, LOW); // enable driver again
-  delay(150);
 
+  // Choose homing direction (CW). Flip HIGH/LOW if needed.
   digitalWrite(DIR_PIN, HIGH);
-  for (int i = 0; i < 10; i++)
-    stepMotor(3000); // startup torque
+  Serial.println("Homing direction: DIR = HIGH (CW)");
 
+  int steps = 0;
   bool found = false;
-  int fastLimit = maxSteps * 0.85;
 
-  Serial.println("Fast scan...");
-  for (int i = 0; i < fastLimit; i++)
+  while (steps < MAX_HOME_STEPS)
   {
-    stepMotor(fastDelay);
-    if (digitalRead(LINE_PIN) == HIGH)
+    // One slow step for maximum torque and precise positioning
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(stepPulseWidth_us);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(HOME_STEP_DELAY_US);
+
+    steps++;
+
+    int sensorVal = digitalRead(LINE_PIN);
+
+    // Print occasionally so you can debug in Serial Monitor
+    if (steps % 50 == 0)
     {
-      Serial.println("Found in FAST region");
+      Serial.print("HOME step ");
+      Serial.print(steps);
+      Serial.print(" | sensor=");
+      Serial.println(sensorVal);
+    }
+
+    if (sensorVal == HOME_LEVEL)
+    {
+      Serial.print(">>> HOME FOUND at step ");
+      Serial.println(steps);
       found = true;
       break;
     }
@@ -533,42 +556,19 @@ void home()
 
   if (!found)
   {
-    Serial.println("Medium scan...");
-    for (int i = fastLimit; i < maxSteps; i++)
-    {
-      stepMotor(mediumDelay);
-      if (digitalRead(LINE_PIN) == HIGH)
-      {
-        Serial.println("Found in MEDIUM region");
-        found = true;
-        break;
-      }
-    }
-  }
-
-  if (!found)
-  {
-    Serial.println("ERROR: Home not found");
+    Serial.println("!!! HOME NOT FOUND within MAX_HOME_STEPS");
+    // You can choose to leave motor enabled or not; I'll disable
+    enableMotor(false);
     return;
   }
 
-  // Back off a bit
-  digitalWrite(DIR_PIN, LOW);
-  for (int i = 0; i < backoffSteps; i++)
-    stepMotor(fastDelay);
-
-  // Ultra slow final capture
-  digitalWrite(DIR_PIN, HIGH);
-  Serial.println("Ultra slow final capture...");
-  for (int i = 0; i < 50; i++)
-  {
-    stepMotor(5000);
-    if (digitalRead(LINE_PIN) == HIGH)
-      break;
-  }
-
-  currentPos = 0; // define this as sector 0 (Pill 1)
+  // Optional: tiny backoff + re-approach if you want to land cleanly.
+  // For now, we keep it simple and just declare this position F= sector 0.
+  currentPos = 0;
   Serial.println("Homing complete, sector=0");
+
+  // You can disable the motor to remove buzz & heat
+  enableMotor(false);
 }
 
 // Map pill number (1–5) to carousel sector (0–4)
@@ -716,6 +716,7 @@ void checkDispenseSchedule()
     {
       dueGroupActive = false;
       // Optional: leave last "Dispensed Pk" or show summary:
+      home();
       lcdShow("All set", "Cleared " + String(cleared));
     }
     return; // keep loop snappy
