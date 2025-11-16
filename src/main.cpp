@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <cstdio>
-#include <time.h> 
+#include <time.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -9,9 +9,9 @@
 #include <LiquidCrystal_I2C.h>
 #include <WiFiUdp.h>
 
-/** 
+/**
  * Talkie Audio Configuration
-*/
+ */
 #include <Talkie.h>
 #include <Vocab_Special.h>
 #include <Vocab_US_Large.h>
@@ -20,7 +20,7 @@
 
 #include <ESP32Servo.h>
 // Initialize Talkie instance
-Talkie voice; 
+Talkie voice;
 
 // DAC pin for audio output
 static const int AUDIO_PIN = 25;
@@ -40,7 +40,7 @@ void speakDispense()
   delay(140);
   dacWrite(AUDIO_PIN, 0);
 }
-//Give warning about low level pills
+// Give warning about low level pills
 void speakLevelLow()
 {
   dacWrite(AUDIO_PIN, 0);
@@ -70,15 +70,24 @@ static const uint8_t I2C_ADDR = 0x27;
 static const int I2C_SDA = 21, I2C_SCL = 22;
 LiquidCrystal_I2C lcd(I2C_ADDR, 16, 2);
 
+// LCD idle / backlight control
+// 30 seconds timeout for demo purposes
+const unsigned long LCD_IDLE_TIMEOUT_MS = 30000UL;
+
+// last time user scrolled
+unsigned long lastActivityMs = 0;
+// tracks current backlight state
+bool backlightOn = true;
+
 /**
  * Button Configuration
  */
 // confirm/dispense
-static const int BTN_PIN = 36;  
- // scroll down
+static const int BTN_PIN = 36;
+// scroll down
 static const int BTN_DOWN = 34;
- // scroll up
-static const int BTN_UP = 35;  
+// scroll up
+static const int BTN_UP = 35;
 static const unsigned long DEBOUNCE_MS = 200;
 
 // Edge-queued button press counter (captures rapid taps)
@@ -99,22 +108,20 @@ enum Mode
 };
 Mode currentMode = SETUP_MODE;
 
-// -----------------------------
 // Time and Scheduling
-// -----------------------------
 WiFiUDP ntpUDP;
 const char *ntpServer = "pool.ntp.org";
 // Puerto Rico timezone
-const long gmtOffset_sec = -4 * 3600; 
+const long gmtOffset_sec = -4 * 3600;
 const int daylightOffset_sec = 0;
 // next scheduled dispense time per pill
-time_t nextDispense[6];   
-// pill is due & waiting for confirm    
-bool dispensing[6] = {false}; 
+time_t nextDispense[6];
+// pill is due & waiting for confirm
+bool dispensing[6] = {false};
 
 // Group/burst handling
 // true while there are unconfirmed due pills
-static bool dueGroupActive = false; 
+static bool dueGroupActive = false;
 
 // -----------------------------
 // Logging (Circular Buffer)
@@ -142,6 +149,7 @@ String makeUrl(const char *path)
   return u;
 }
 
+// Function that initializes LCD display, sets cursors and clears.
 void lcdShow(const String &l1, const String &l2)
 {
 #if USE_LCD
@@ -153,6 +161,16 @@ void lcdShow(const String &l1, const String &l2)
 #endif
 }
 
+// Function that wakes up LCD and resets the timer of inactivity.
+void lcdWakeAndResetIdle()
+{
+#if USE_LCD
+  lcd.backlight();
+  backlightOn = true;
+  lastActivityMs = millis();
+#endif
+}
+
 // ---- TS formatting helpers ----
 // Line-2 fits 16 chars exactly: "DD/MM/YY HH:MMAM"
 void formatDateLine(char *out, size_t n, time_t t)
@@ -160,11 +178,11 @@ void formatDateLine(char *out, size_t n, time_t t)
   struct tm tmv;
   localtime_r(&t, &tmv);
   // "DD/MM/YY" -> 8
-  char datebuf[9]; 
+  char datebuf[9];
   // "HH:MM"    -> 5 (12-hour)
   char timebuf[6];
   // "%p" -> "AM"/"PM"
-  char pbuf[3];   
+  char pbuf[3];
 
   strftime(datebuf, sizeof(datebuf), "%d/%m/%y", &tmv);
   strftime(timebuf, sizeof(timebuf), "%I:%M", &tmv);
@@ -181,20 +199,20 @@ void formatDateLine(char *out, size_t n, time_t t)
 // -----------------------------
 // Non-blocking Network Queue
 // -----------------------------
-//Stores one HTTP request (URL + data body).
+// Stores one HTTP request (URL + data body).
 struct NetJob
 {
   String url;
   String body;
 };
-//Circular buffer of pending network requests
+// Circular buffer of pending network requests
 static NetJob jobs[12];
 static int qh = 0, qt = 0;
-//True when queue has no pending jobs.
+// True when queue has no pending jobs.
 inline bool qEmpty() { return qh == qt; }
-//True when queue has no space left.
+// True when queue has no space left.
 inline bool qFull() { return ((qt + 1) % (int)(sizeof(jobs) / sizeof(jobs[0]))) == qh; }
-//Adds a job to the queue (drops if full).
+// Adds a job to the queue (drops if full).
 void enqueueJob(const String &url, const String &body)
 {
   if (qFull())
@@ -209,8 +227,8 @@ void enqueueJob(const String &url, const String &body)
 // Reused TLS client to reduce handshake overhead
 static WiFiClientSecure sharedClient;
 static HTTPClient sharedHttp;
-//It handles sending out queued network jobs one at a time 
-//Sends one queued job every 150 ms
+// It handles sending out queued network jobs one at a time
+// Sends one queued job every 150 ms
 void serviceNetQueue()
 {
   static unsigned long lastKick = 0;
@@ -273,7 +291,7 @@ void maybeLowStockAlert(int pill, int prevStock, int prevThresh);
 // -----------------------------
 // Commands (pull stays blocking; only in SETUP)
 // -----------------------------
-//Fetches a JSON command from a web server via HTTPS
+// Fetches a JSON command from a web server via HTTPS
 bool httpsGet(const String &url, String &out)
 {
   WiFiClientSecure client;
@@ -288,7 +306,7 @@ bool httpsGet(const String &url, String &out)
   http.end();
   return (code >= 200 && code < 300);
 }
-//Applies the received command locally (updates pill stock, threshold, or frequency).
+// Applies the received command locally (updates pill stock, threshold, or frequency).
 void applyCommand(int pill, const char *field, int value)
 {
   int prevStock = stockv[pill];
@@ -314,7 +332,7 @@ void applyCommand(int pill, const char *field, int value)
 
   pushTelemetry(pill); // enqueued
 }
-//Polls the server repeatedly to download and execute commands.
+// Polls the server repeatedly to download and execute commands.
 void pullCommandsDrain()
 {
   for (int i = 0; i < 5; ++i)
@@ -351,7 +369,6 @@ void maybeLowStockAlert(int pill, int prevStock, int prevThresh)
   }
 }
 
-// New: fires on ALARM ACTIVATION (every time pill becomes due)
 // Use this to replay the low-stock audio each time the alarm triggers.
 void lowStockAlertOnAlarm(int pill)
 {
@@ -365,18 +382,19 @@ void lowStockAlertOnAlarm(int pill)
 // -----------------------------
 // Scheduling & Logging
 // -----------------------------
-//Schedules the next dispensing time for a specific pill compartment.
+// Schedules the next dispensing time for a specific pill compartment.
 void scheduleNextDispense(int pill)
 {
   time_t now;
   time(&now);
   // freq * 1 min demo
-  nextDispense[pill] = now + freqv[pill] * 60; 
-   // reset wait-for-confirm
-  dispensing[pill] = false;                   
+  nextDispense[pill] = now + freqv[pill] * 60;
+  // reset wait-for-confirm
+  dispensing[pill] = false;
   Serial.printf("[SCHED] Pill %d next at %ld\n", pill, nextDispense[pill]);
 }
-//Records a new dispensing event in a circular log buffer.
+
+// Records a new dispensing event in a circular log buffer.
 void addLog(int pill)
 {
   time_t now;
@@ -387,7 +405,7 @@ void addLog(int pill)
   // Point to newest log
   logIndex = (logCount - 1) % 5;
 }
-//Displays a specific log entry in LCD.
+// Displays a specific log entry in LCD.
 void displayLogAtIndex(int index)
 {
   if (logCount == 0)
@@ -414,46 +432,42 @@ void displayLogAtIndex(int index)
 #define EN_PIN 33
 #define DIR_PIN 26
 #define STEP_PIN 27
-#define LINE_PIN 14  // HIGH = BLACK / home mark detected
-#define SERVO_PIN 23 // servo control pin
+// HIGH = BLACK / home mark detected
+#define LINE_PIN 14
+// servo control pin
+#define SERVO_PIN 23
 
-// Stepper configuration 
+// Stepper configuration
 const int stepPulseWidth_us = 30;
-const int steps_per_rev = 1600;   
-// steps per 72° sector          
-const int steps_per_sector = steps_per_rev / 5; 
-// Homing configuration 
-const int HOME_LEVEL = HIGH; 
-// slow & strong for homing        
-const int HOME_STEP_DELAY_US = 3000; 
-const int MAX_HOME_STEPS = 3000;    
+const int steps_per_rev = 1600;
+// steps per 72° sector
+const int steps_per_sector = steps_per_rev / 5;
+// Homing configuration
+const int HOME_LEVEL = HIGH;
+// slow & strong for homing
+const int HOME_STEP_DELAY_US = 3000;
+const int MAX_HOME_STEPS = 3000;
 // Current sector (0–4), mapping 0..4 to 5 pill slots
-int currentPos = 0; 
+int currentPos = 0;
 
 // Movement speeds (safe)
 // fastest (motor starts reliably)
-int smoothFastDelay = 600; 
+int smoothFastDelay = 600;
 // slowest allowed before stall
-int smoothSlowDelay = 900; 
-
-// // Homing speeds (proven)
-// int fastDelay = 600;
-// int mediumDelay = 1500;
-// int slowDelay = 3000;
-// int backoffSteps = 8;
-// int homeOffset = 2;
-// int maxSteps = 400; // 2 full revs (FULL-STEP MODE)
+int smoothSlowDelay = 900;
 
 // Servo dispenser
 Servo dispenserServo;
-int servoRestPos = 0;      // starting angle
-int servoDispensePos = 60; // forward rotation for dispensing
+// starting angle
+int servoRestPos = 0;
+// forward rotation for dispensing
+int servoDispensePos = 60;
 
 // Enable/disable stepper driver
 void enableMotor(bool on)
 {
   // TB6600 enable = LOW
-  digitalWrite(EN_PIN, on ? LOW : HIGH); 
+  digitalWrite(EN_PIN, on ? LOW : HIGH);
 }
 
 // Single step helper
@@ -484,10 +498,14 @@ void rotateStepsSmooth(int steps)
 // Servo dispensing action: 60° knock and return
 void dispenseAction()
 {
-  dispenserServo.write(servoDispensePos); // rotate forward 60°
-  delay(500);                             // hold briefly
-  dispenserServo.write(servoRestPos);     // return to rest
-  delay(500);                             // small pause before continuing
+  // rotate forward 60°
+  dispenserServo.write(servoDispensePos);
+  // hold briefly
+  delay(500);
+  // return to rest
+  dispenserServo.write(servoRestPos);
+  // small pause before continuing
+  delay(500);
 }
 
 // Move carousel to a given sector (0–4) and then knock pill
@@ -499,7 +517,7 @@ void moveToPosition(int targetPos)
     dispenseAction();
     return;
   }
- // give TB6600 time to energize
+  // give TB6600 time to energize
   enableMotor(true);
   delay(50);
 
@@ -512,7 +530,7 @@ void moveToPosition(int targetPos)
     delta += 5;
   // calculate amount of steps to move for shortest distance.
   int stepsToMove = abs(delta) * steps_per_sector;
-  //set the direction cw or ccw
+  // set the direction cw or ccw
   bool dir = (delta > 0);
 
   digitalWrite(DIR_PIN, dir ? HIGH : LOW);
@@ -520,11 +538,11 @@ void moveToPosition(int targetPos)
   Serial.printf("[MOVE] %s %d sectors (%d steps)\n",
                 dir ? "CW" : "CCW",
                 abs(delta), stepsToMove);
-  //Move the stepper that amount of steps
+  // Move the stepper that amount of steps
   rotateStepsSmooth(stepsToMove);
   // when finished moving update current position
   currentPos = targetPos;
-  //time to settle motor and inertia
+  // time to settle motor and inertia
   delay(200);
   enableMotor(false);
 
@@ -585,7 +603,7 @@ void home()
   if (!found)
   {
     Serial.println("!!! HOME NOT FOUND within MAX_HOME_STEPS");
-    //Disable motor if home not found.
+    // Disable motor if home not found.
     enableMotor(false);
     return;
   }
@@ -594,7 +612,7 @@ void home()
   currentPos = 0;
   Serial.println("Homing complete, sector=0");
 
-  //disable the motor to remove buzz & heat
+  // disable the motor to remove buzz & heat
   enableMotor(false);
 }
 
@@ -618,8 +636,8 @@ void dispensePhysicalPill(int pill)
 // Confirm ALL currently-due pills (one press clears the burst)
 // Retuns amount of dispensed pills.
 // -----------------------------
-//Dispenses all pills that are due physically 
-//Called after check dispense schedule.
+// Dispenses all pills that are due physically
+// Called after check dispense schedule.
 int confirmAllDuePills()
 {
   time_t now;
@@ -628,9 +646,12 @@ int confirmAllDuePills()
 
   for (int p = 1; p <= 5; ++p)
   {
-    //Confirms pills that need to be dispensed.
+    // Confirms pills that need to be dispensed.
     if (freqv[p] > 0 && now >= nextDispense[p] && dispensing[p])
     {
+
+      lcdWakeAndResetIdle(); // wake LCD & reset idle timer
+
       // -----------------------------
       // Physical dispensing: rotate carousel and knock pill
       // -----------------------------
@@ -638,19 +659,19 @@ int confirmAllDuePills()
 
       if (stockv[p] > 0)
         stockv[p]--;
-      //Show feedback on LCD
+      // Show feedback on LCD
       char line2[17];
       formatDateLine(line2, sizeof(line2), now); // "DD/MM/YY HH:MMAM"
       lcdShow("Dispensed P" + String(p), String(line2));
-      //Record event + report to server
+      // Record event + report to server
       addLog(p);
-      pushTelemetry(p);                           
+      pushTelemetry(p);
       pushAlert("dispense", p, "User dispensed");
 
       // Keep one-time crossing alert after decrement
       maybeLowStockAlert(p, stockv[p] + 1, thresh[p]);
       // push to future & clear dispensing[p]
-      scheduleNextDispense(p); 
+      scheduleNextDispense(p);
       cleared++;
     }
   }
@@ -665,7 +686,7 @@ void checkDispenseSchedule()
   time_t tnow;
   time(&tnow);
 
-  //Mark pills that just became due
+  // Mark pills that just became due
   bool anyDue = false;
   for (int p = 1; p <= 5; ++p)
   {
@@ -686,7 +707,7 @@ void checkDispenseSchedule()
     }
   }
 
-  //If a new burst just started, speak ONCE and show UI (group-level only)
+  // If a new burst just started, speak ONCE and show UI (group-level only)
   if (anyDue && !dueGroupActive)
   {
     int dueCount = 0;
@@ -703,6 +724,8 @@ void checkDispenseSchedule()
     // We keep only the group logic: LCD + audio. Notifications are per-pill above.
     if (dueCount > 0)
     {
+      lcdWakeAndResetIdle(); // wake LCD & reset idle timer
+
       // lcdShow("Time to take", String(dueCount) + " pill(s) due");
       lcdShow("Time to take", " pills");
       speakDispense(); // full audio (once per burst)
@@ -720,7 +743,7 @@ void checkDispenseSchedule()
     }
   }
 
-  //If user pressed confirm, clear ALL currently-due pills in this burst
+  // If user pressed confirm, clear ALL currently-due pills in this burst
   uint8_t got = 0;
   noInterrupts();
   if (btnCount > 0)
@@ -728,7 +751,7 @@ void checkDispenseSchedule()
     btnCount--;
     got = 1;
   }
-  //Enable interrupts for button presses.
+  // Enable interrupts for button presses.
   interrupts();
 
   if (got && dueGroupActive)
@@ -747,6 +770,7 @@ void checkDispenseSchedule()
     if (!stillDue)
     {
       dueGroupActive = false;
+      lcdWakeAndResetIdle();
       // Optional: leave last "Dispensed Pk" or show summary:
       home();
       lcdShow("All set", "Cleared " + String(cleared));
@@ -754,7 +778,7 @@ void checkDispenseSchedule()
     return; // keep loop snappy
   }
 
-  //No confirm; nothing else to do here this tick
+  // No confirm; nothing else to do here this tick
 }
 
 // -----------------------------
@@ -779,6 +803,10 @@ void setup()
   lcd.init();
   lcd.backlight();
   lcdShow("Booting...", "WiFi connect");
+
+  // initialize idle timer
+  lastActivityMs = millis();
+  backlightOn = true;
 #endif
 
   pinMode(BTN_PIN, INPUT);
@@ -798,11 +826,11 @@ void setup()
 
   dispenserServo.attach(SERVO_PIN);
   // move servo to rest position
-  dispenserServo.write(servoRestPos); 
+  dispenserServo.write(servoRestPos);
   enableMotor(false);
   delay(100);
   // home carousel so sector 0 corresponds to Pill 1
-  home(); 
+  home();
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("WiFi");
@@ -827,6 +855,9 @@ void handleScrollButtons()
   if (digitalRead(BTN_DOWN))
   {
     lastPress = millis();
+
+    lcdWakeAndResetIdle();
+
     if (logCount > 0)
     {
       logIndex = (logIndex + 1) % min(logCount, 5);
@@ -838,6 +869,9 @@ void handleScrollButtons()
   else if (digitalRead(BTN_UP))
   {
     lastPress = millis();
+
+    lcdWakeAndResetIdle();
+
     if (logCount > 0)
     {
       int validCount = min(logCount, 5);
@@ -848,7 +882,8 @@ void handleScrollButtons()
       lcdShow("No logs yet", "");
   }
 }
-//Main loop of program
+
+// Main loop of program
 void loop()
 {
   static unsigned long tPoll = 0, tWiFiCheck = 0;
@@ -859,7 +894,7 @@ void loop()
     {
       tPoll = millis();
       // blocking is fine here
-      pullCommandsDrain(); 
+      pullCommandsDrain();
     }
 
     // Enter MAIN when button pressed (use queued press)
@@ -886,6 +921,15 @@ void loop()
   {
     checkDispenseSchedule(); // burst-aware
     handleScrollButtons();
+
+#if USE_LCD
+    // Turn off backlight after 30 seconds of no scroll activity
+    if (backlightOn && (millis() - lastActivityMs >= LCD_IDLE_TIMEOUT_MS))
+    {
+      lcd.noBacklight();
+      backlightOn = false;
+    }
+#endif
     serviceNetQueue(); // drain HTTP queue
 
     if (millis() - tWiFiCheck > 5000)
